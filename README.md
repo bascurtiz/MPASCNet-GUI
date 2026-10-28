@@ -2,6 +2,7 @@
 
 <p align="left">
   <a href="https://colab.research.google.com/github/bascurtiz/MPASCNet-GUI/blob/main/MPASCNet_Colab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
+  <a href="https://youtu.be/289NxHVnQOQ"><img src="https://img.shields.io/badge/YouTube-Video%20Demo-red?logo=youtube" alt="YouTube Demo"></a>
   <a href="https://huggingface.co/Xinghour/MPASCNet"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-yellow" alt="Hugging Face"></a>
   <a href="https://arxiv.org/abs/2610.16416"><img src="https://img.shields.io/badge/arXiv-2610.16416-b31b1b.svg" alt="arXiv"></a>
 </p>
@@ -61,6 +62,17 @@ checkpoint/
 No GPU on your computer? Click below to run the Web Studio online using Google's free cloud GPU:
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bascurtiz/MPASCNet-GUI/blob/main/MPASCNet_Colab.ipynb)
+
+##### Video Tutorial: How to Use Google Colab
+Watch the step-by-step walkthrough on how to launch and use the Web Studio in Google Colab:
+
+<p align="center">
+  <a href="https://youtu.be/289NxHVnQOQ">
+    <img src="https://img.youtube.com/vi/289NxHVnQOQ/maxresdefault.jpg" width="100%" alt="MPASCNet Google Colab Demo Video">
+  </a>
+</p>
+
+> 📺 **Video Walkthrough**: Watch [MPASCnet (Google Colab demo)](https://youtu.be/289NxHVnQOQ) on YouTube.
 
 #### Option B: Run Locally on Your GPU (Windows / Linux / Mac)
 Launch the interactive Web GUI locally on your machine:
