@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+import urllib.parse
 import time
 import json
 import uuid
@@ -161,13 +163,10 @@ def enhance_audio_chunk(audio, generator, h, device):
     return audio_g.squeeze(0).detach().cpu()
 
 
-def enhance_audio_full(audio, generator, h, device, chunk_sec=24.0, overlap_sec=3.0):
+def enhance_audio_full(audio, generator, h, device, chunk_sec=8.0, overlap_sec=1.0):
     """
-    Enhances full audio using Hann-smoothed overlap-add crossfade.
-    - Uses 24-second chunks with 3-second Hann crossfade for seamless temporal context.
-    - Short audio (<= 35s, including preview mode) runs in a single continuous pass.
-    - Avoids phase cancellation boundary dips and volume fluctuations between chunks.
-    - Zero-padding free tail processing preserves natural dynamics through to the end.
+    Enhances full audio using seamless overlap-add crossfade.
+    Guarantees fixed low VRAM usage regardless of audio duration.
     """
     sr = h.sampling_rate
     channels, total_samples = audio.shape
@@ -175,14 +174,13 @@ def enhance_audio_full(audio, generator, h, device, chunk_sec=24.0, overlap_sec=
     overlap = int(overlap_sec * sr)
     hop = chunk_len - overlap
 
-    if total_samples <= sr * 35 or total_samples <= chunk_len + overlap:
-        # Short audio or preview mode: run in a single continuous pass
+    if total_samples <= chunk_len + overlap:
+        # Short audio: run in a single pass
         return enhance_audio_chunk(audio, generator, h, device)
 
-    # Hann crossfade window for smooth overlap-add without phase dips
-    hann = torch.hann_window(2 * overlap)
-    fade_in = hann[:overlap]
-    fade_out = hann[overlap:]
+    # Window for overlap-add crossfading
+    fade_in = torch.linspace(0.0, 1.0, overlap)
+    fade_out = torch.linspace(1.0, 0.0, overlap)
     window = torch.ones(chunk_len)
     window[:overlap] = fade_in
     window[-overlap:] = fade_out
@@ -190,23 +188,24 @@ def enhance_audio_full(audio, generator, h, device, chunk_sec=24.0, overlap_sec=
     output = torch.zeros_like(audio)
     weights = torch.zeros(total_samples)
 
-    # Determine chunk start positions ensuring the last chunk aligns to total_samples without zero-padding
-    starts = list(range(0, total_samples - chunk_len, hop))
-    if len(starts) == 0 or starts[-1] != (total_samples - chunk_len):
-        starts.append(total_samples - chunk_len)
+    for start in range(0, total_samples, hop):
+        end = min(start + chunk_len, total_samples)
+        cur_len = end - start
 
-    num_chunks = len(starts)
-    for idx, start in enumerate(starts):
-        end = start + chunk_len
         chunk = audio[:, start:end]
+        if cur_len < chunk_len:
+            # Pad chunk to chunk_len for STFT consistency
+            pad_amount = chunk_len - cur_len
+            chunk = F.pad(chunk, (0, pad_amount))
 
         enhanced_chunk = enhance_audio_chunk(chunk, generator, h, device)
+        enhanced_chunk = enhanced_chunk[:, :cur_len]
 
-        cur_window = window.clone()
-        if idx == 0:
+        cur_window = window[:cur_len].clone()
+        if start == 0:
             cur_window[:overlap] = 1.0
-        if idx == num_chunks - 1:
-            cur_window[-overlap:] = 1.0
+        if end == total_samples:
+            cur_window[-min(overlap, cur_len):] = 1.0
 
         output[:, start:end] += enhanced_chunk * cur_window
         weights[start:end] += cur_window
@@ -507,15 +506,20 @@ def api_process():
 
         # 2. Run MPASCNet Enhancement
         with MODEL_LOCK:
+            peak = audio.abs().max().clamp(min=1e-8)
             with torch.no_grad():
-                enhanced = enhance_audio_full(audio, MODEL, CONFIG, DEVICE)
+                enhanced = enhance_audio_full(audio / peak, MODEL, CONFIG, DEVICE) * peak
             enhanced = enhanced.clamp(-1.0, 1.0)
 
         process_time = time.time() - start_time
 
         # 3. Export Audio Files
+        base_name = os.path.splitext(orig_filename)[0]
+        safe_base = re.sub(r'[\\/*?:"<>|]', '_', base_name).strip() or "audio"
+        download_filename = f"{safe_base}_restored.wav"
+
         orig_wav_path = os.path.join(OUTPUT_DIR, f"{session_id}_orig.wav")
-        rest_wav_path = os.path.join(OUTPUT_DIR, f"{session_id}_restored.wav")
+        rest_wav_path = os.path.join(OUTPUT_DIR, f"{session_id}_{download_filename}")
 
         sf.write(orig_wav_path, audio.T.numpy(), sr)
         sf.write(rest_wav_path, enhanced.T.numpy(), sr)
@@ -539,6 +543,7 @@ def api_process():
             "success": True,
             "session_id": session_id,
             "filename": orig_filename,
+            "download_filename": download_filename,
             "duration_sec": round(total_duration, 2),
             "duration_formatted": min_sec_str,
             "channels": channels,
@@ -551,7 +556,7 @@ def api_process():
             "spek_orig_url": f"/api/image/{os.path.basename(spek_orig_png)}",
             "spek_rest_url": f"/api/image/{os.path.basename(spek_rest_png)}",
             "waveform_url": f"/api/image/{os.path.basename(waveform_png)}",
-            "download_url": f"/api/download/{os.path.basename(rest_wav_path)}"
+            "download_url": f"/api/download/{os.path.basename(rest_wav_path)}?name={urllib.parse.quote(download_filename)}"
         })
 
     except Exception as e:
@@ -572,7 +577,10 @@ def serve_image(filename):
 
 @app.route('/api/download/<filename>')
 def download_audio(filename):
-    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True)
+    custom_name = request.args.get('name')
+    if not custom_name:
+        custom_name = re.sub(r'^[a-f0-9]{8}_', '', filename)
+    return send_from_directory(OUTPUT_DIR, filename, as_attachment=True, download_name=custom_name)
 
 
 if __name__ == '__main__':

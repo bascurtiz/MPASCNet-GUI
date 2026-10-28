@@ -622,7 +622,7 @@
               <span><strong>Fast Preview:</strong> Process first 30 seconds only</span>
             </label>
             <p style="font-size: 12px; color: var(--text-dim);">
-              Seamless 24s overlap-add chunking with Hann crossfade is active. Full-length songs are restored smoothly without volume dips or GPU memory limits.
+              Seamless overlap-add chunking is active. Even 5+ minute full-length songs can be restored without running out of GPU memory.
             </p>
           </div>
         </div>
@@ -904,6 +904,9 @@
       audioOrig.src = data.orig_audio_url;
       audioRest.src = data.rest_audio_url;
       btnDownload.href = data.download_url;
+      if (data.download_filename) {
+        btnDownload.setAttribute('download', data.download_filename);
+      }
 
       waveformImg.src = data.waveform_url + '?t=' + Date.now();
       spekOrigImg.src = data.spek_orig_url + '?t=' + Date.now();

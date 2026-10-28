@@ -149,7 +149,9 @@ def inference_audio_input(a, h, generator, device):
             if sampling_rate != h.sampling_rate:
                 audio = torchaudio.functional.resample(audio, sampling_rate, h.sampling_rate)
             
-            enhanced_audio = enhance_audio(audio, generator, h, device)
+            # Apply peak normalization to reduce the data distribution mismatch between training and inference.
+            peak = audio.abs().max().clamp(min=1e-8)
+            enhanced_audio = enhance_audio(audio / peak, generator, h, device) * peak
 
             if sampling_rate != h.sampling_rate:
                 enhanced_audio = torchaudio.functional.resample(enhanced_audio, h.sampling_rate, sampling_rate)
