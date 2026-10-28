@@ -5,12 +5,19 @@ import json
 import uuid
 import subprocess
 import threading
+import warnings
+warnings.filterwarnings('ignore')
+
 import numpy as np
 import soundfile as sf
 import logging
-# Suppress noisy font lookup warnings in headless/cloud/Colab environments
+# Suppress noisy font lookup and werkzeug startup warnings
 logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
 logging.getLogger('matplotlib').setLevel(logging.ERROR)
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+
+import flask.cli
+flask.cli.show_server_banner = lambda *args, **kwargs: None
 
 import matplotlib
 matplotlib.use('Agg')
@@ -570,20 +577,23 @@ if __name__ == '__main__':
     import re
     parser = argparse.ArgumentParser(description="MPASCNet Web GUI")
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 7860)), help="Port to listen on")
+    parser.add_argument('--colab-url', type=str, default=os.environ.get('COLAB_PROXY_URL', ''), help="Direct Google Colab Proxy URL")
     parser.add_argument('--share', action='store_true', help="Create public Cloudflare tunnel link")
     args = parser.parse_args()
 
     init_model()
 
+    is_colab = os.path.exists('/content') or 'google.colab' in sys.modules
+    target_url = (args.colab_url or os.environ.get('COLAB_PROXY_URL', '')).strip()
+
     if args.share and sys.platform.startswith('linux'):
-        # Direct Cloudflare Quick Tunnel (Zero config, zero password)
+        # Cloudflare Quick Tunnel (Zero config, zero password)
         if not os.path.isfile('/usr/local/bin/cloudflared'):
-            print("Setting up Cloudflare tunnel for public sharing...")
             try:
-                subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True)
+                subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run(['chmod', '+x', '/usr/local/bin/cloudflared'], check=True)
-            except Exception as e:
-                print(f"Notice: Could not download cloudflared: {e}")
+            except Exception:
+                pass
 
         def run_cf_tunnel():
             try:
@@ -591,29 +601,20 @@ if __name__ == '__main__':
                 for line in p.stdout:
                     match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
                     if match:
-                        print(f"\n=======================================================")
-                        print(f"  PUBLIC SHARE URL: {match.group(0)}")
-                        print(f"=======================================================\n")
-            except Exception as ex:
-                print(f"Cloudflare notice: {ex}")
+                        print(f"  🔗 Cloudflare Public URL: {match.group(0)}\n")
+            except Exception:
+                pass
 
         threading.Thread(target=run_cf_tunnel, daemon=True).start()
 
-    is_colab = os.path.exists('/content') or 'google.colab' in sys.modules
-    if is_colab:
-        try:
-            from google.colab.output import serve_kernel_port_as_window
-            serve_kernel_port_as_window(args.port, anchor_text=f"👉 Open MPASCNet Studio (Direct Google Colab Proxy)")
-        except Exception:
-            pass
-
     print(f"\n=======================================================")
-    if is_colab:
+    if target_url:
         print(f"  MPASCNet Cloud Studio is running in Google Colab!")
-        print(f"  * DO NOT click 'localhost:{args.port}' or '172.28.x.x' (they are internal to Colab).")
-        print(f"  * Use the PUBLIC SHARE URL or the Direct Colab Proxy link above.")
+        print(f"  👉 PUBLIC SHARE URL: {target_url}")
+    elif is_colab:
+        print(f"  MPASCNet Cloud Studio is running in Google Colab on port {args.port}!")
     else:
-        print(f"  MPASCNet Web GUI is starting!")
-        print(f"  Open in your web browser: http://localhost:{args.port}")
+        print(f"  MPASCNet Web GUI is running!")
+        print(f"  👉 Local URL: http://localhost:{args.port}")
     print(f"=======================================================\n")
     app.run(host='0.0.0.0', port=args.port, debug=False)
