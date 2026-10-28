@@ -1,6 +1,12 @@
 # MPASCNet: Magnitude-Phase-Aware Adaptive Spectral Compression for Compressed Music Restoration
 
-PyTorch implementation of **MPASCNet**, a magnitude-phase-aware adaptive spectral compression network for compressed music restoration.
+<p align="left">
+  <a href="https://colab.research.google.com/github/bascurtiz/MPASCNet-GUI/blob/main/MPASCNet_Colab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
+  <a href="https://huggingface.co/Xinghour/MPASCNet"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Weights-yellow" alt="Hugging Face"></a>
+  <a href="https://arxiv.org/abs/2610.16416"><img src="https://img.shields.io/badge/arXiv-2610.16416-b31b1b.svg" alt="arXiv"></a>
+</p>
+
+PyTorch implementation of **MPASCNet**, a magnitude-phase-aware adaptive spectral compression network for compressed music restoration, featuring an interactive **Spek-Alternative** acoustic spectrum analysis Web GUI.
 
 <p align="center">
   <img src="assets/mpascnet_architecture.svg" width="100%">
@@ -47,11 +53,17 @@ checkpoint/
 
 ### Interactive Web Studio (Spek-Alternative Analyzer)
 
-Launch the interactive Web GUI with synchronized A/B audio player and Spek-style acoustic spectrograms:
-
 <p align="center">
   <img src="assets/gui.webp" width="100%" alt="MPASCNet Web Studio & Spek Spectrograms">
 </p>
+
+#### Option A: Run Online via Google Colab (Free NVIDIA T4 GPU)
+No GPU on your computer? Click below to run the Web Studio online using Google's free cloud GPU:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/bascurtiz/MPASCNet-GUI/blob/main/MPASCNet_Colab.ipynb)
+
+#### Option B: Run Locally on Your GPU (Windows / Linux / Mac)
+Launch the interactive Web GUI locally on your machine:
 
 ```bash
 python web_gui.py

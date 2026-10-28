@@ -72,13 +72,17 @@ def init_model():
     print(f"Using compute device: {DEVICE}")
 
     model = MPASCNet(CONFIG).to(DEVICE)
-    if os.path.isfile(CHECKPOINT_PATH):
-        print(f"Loading checkpoint from: {CHECKPOINT_PATH}")
-        sd = load_checkpoint(CHECKPOINT_PATH, DEVICE)
-        model.load_state_dict(sd['generator'] if 'generator' in sd else sd)
-        print("Checkpoint loaded successfully.")
-    else:
-        print(f"WARNING: Checkpoint not found at {CHECKPOINT_PATH}")
+    if not os.path.isfile(CHECKPOINT_PATH):
+        print(f"Checkpoint not found at {CHECKPOINT_PATH}. Auto-downloading from Hugging Face...")
+        os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve("https://huggingface.co/Xinghour/MPASCNet/resolve/main/best", CHECKPOINT_PATH)
+        print("Checkpoint downloaded successfully.")
+
+    print(f"Loading checkpoint from: {CHECKPOINT_PATH}")
+    sd = load_checkpoint(CHECKPOINT_PATH, DEVICE)
+    model.load_state_dict(sd['generator'] if 'generator' in sd else sd)
+    print("Checkpoint loaded successfully.")
 
     model.eval()
 
@@ -548,10 +552,42 @@ def download_audio(filename):
 
 
 if __name__ == '__main__':
+    import argparse
+    import re
+    parser = argparse.ArgumentParser(description="MPASCNet Web GUI")
+    parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 7860)), help="Port to listen on")
+    parser.add_argument('--share', action='store_true', help="Create a public Cloudflare tunnel link (useful for Google Colab)")
+    args = parser.parse_args()
+
     init_model()
-    port = int(os.environ.get('PORT', 7860))
+
+    if args.share:
+        # Tunnel support (Colab / Linux)
+        if sys.platform.startswith('linux'):
+            if not os.path.isfile('/usr/local/bin/cloudflared'):
+                print("Setting up Cloudflare tunnel for Colab public sharing...")
+                try:
+                    subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True)
+                    subprocess.run(['chmod', '+x', '/usr/local/bin/cloudflared'], check=True)
+                except Exception as e:
+                    print(f"Notice: Could not download cloudflared: {e}")
+
+            def run_tunnel():
+                try:
+                    p = subprocess.Popen(['cloudflared', 'tunnel', '--url', f'http://127.0.0.1:{args.port}'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    for line in p.stdout:
+                        match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
+                        if match:
+                            print(f"\n=======================================================")
+                            print(f"  PUBLIC SHARE URL: {match.group(0)}")
+                            print(f"=======================================================\n")
+                except Exception as ex:
+                    print(f"Tunnel notice: {ex}")
+
+            threading.Thread(target=run_tunnel, daemon=True).start()
+
     print(f"\n=======================================================")
     print(f"  MPASCNet Web GUI is starting!")
-    print(f"  Open in your web browser: http://localhost:{port}")
+    print(f"  Open in your web browser: http://localhost:{args.port}")
     print(f"=======================================================\n")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=args.port, debug=False)
