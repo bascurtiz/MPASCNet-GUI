@@ -49,6 +49,10 @@ checkpoint/
 
 Launch the interactive Web GUI with synchronized A/B audio player and Spek-style acoustic spectrograms:
 
+<p align="center">
+  <img src="assets/gui.webp" width="100%" alt="MPASCNet Web Studio & Spek Spectrograms">
+</p>
+
 ```bash
 python web_gui.py
 ```
