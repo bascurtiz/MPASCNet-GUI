@@ -570,86 +570,34 @@ if __name__ == '__main__':
     import re
     parser = argparse.ArgumentParser(description="MPASCNet Web GUI")
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 7860)), help="Port to listen on")
-    parser.add_argument('--share', action='store_true', help="Create public tunnel links (localtunnel + Cloudflare)")
-    parser.add_argument('--subdomain', type=str, default='mpascnet', help="Custom subdomain for localtunnel (e.g. mpascnet -> https://mpascnet.loca.lt)")
-    parser.add_argument('--tunnel-token', type=str, default=os.environ.get('TUNNEL_TOKEN', ''), help="Cloudflare Named Tunnel token for custom domain (e.g. mpascnet.keybpm.info)")
+    parser.add_argument('--share', action='store_true', help="Create public Cloudflare tunnel link")
     args = parser.parse_args()
 
     init_model()
 
-    if args.share or args.tunnel_token:
-        # Tunnel support (Colab / Linux)
-        if sys.platform.startswith('linux'):
-            # Download cloudflared if needed
-            if not os.path.isfile('/usr/local/bin/cloudflared'):
-                print("Setting up cloudflared for public tunneling...")
-                try:
-                    subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True)
-                    subprocess.run(['chmod', '+x', '/usr/local/bin/cloudflared'], check=True)
-                except Exception as e:
-                    print(f"Notice: Could not download cloudflared: {e}")
+    if args.share and sys.platform.startswith('linux'):
+        # Direct Cloudflare Quick Tunnel (Zero config, zero password)
+        if not os.path.isfile('/usr/local/bin/cloudflared'):
+            print("Setting up Cloudflare tunnel for public sharing...")
+            try:
+                subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True)
+                subprocess.run(['chmod', '+x', '/usr/local/bin/cloudflared'], check=True)
+            except Exception as e:
+                print(f"Notice: Could not download cloudflared: {e}")
 
-            if args.tunnel_token:
-                # Named Cloudflare Tunnel for custom domain (e.g. mpascnet.keybpm.info)
-                def run_named_tunnel():
-                    try:
-                        p = subprocess.Popen(['cloudflared', 'tunnel', 'run', '--token', args.tunnel_token], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        def run_cf_tunnel():
+            try:
+                p = subprocess.Popen(['cloudflared', 'tunnel', '--url', f'http://127.0.0.1:{args.port}'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p.stdout:
+                    match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
+                    if match:
                         print(f"\n=======================================================")
-                        print(f"  NAMED CLOUDFLARE TUNNEL RUNNING!")
-                        print(f"  Active on your domain: https://mpascnet.keybpm.info")
+                        print(f"  PUBLIC SHARE URL: {match.group(0)}")
                         print(f"=======================================================\n")
-                        for line in p.stdout:
-                            pass
-                    except Exception as ex:
-                        print(f"Named tunnel notice: {ex}")
+            except Exception as ex:
+                print(f"Cloudflare notice: {ex}")
 
-                threading.Thread(target=run_named_tunnel, daemon=True).start()
-            else:
-                # 1. Custom URL via localtunnel (e.g. https://mpascnet.loca.lt)
-                try:
-                    import urllib.request
-                    external_ip = urllib.request.urlopen('https://ipv4.icanhazip.com', timeout=3).read().decode('utf8').strip()
-                except Exception:
-                    external_ip = "check Colab IP"
-
-                def run_localtunnel():
-                    try:
-                        p = subprocess.Popen(['npx', '-y', 'localtunnel', '--port', str(args.port), '--subdomain', args.subdomain], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                        for line in p.stdout:
-                            match = re.search(r'https://[a-zA-Z0-9-]+\.loca\.lt', line)
-                            if match:
-                                print(f"\n=======================================================")
-                                print(f"  CUSTOM SUBDOMAIN URL: {match.group(0)}")
-                                print(f"  TUNNEL PASSWORD (IP): {external_ip}")
-                                print(f"  (Enter the IP above if prompted on first visit)")
-                                print(f"=======================================================\n")
-                    except Exception as ex:
-                        print(f"Localtunnel notice: {ex}")
-
-                threading.Thread(target=run_localtunnel, daemon=True).start()
-
-                # 2. Direct Cloudflare Quick Tunnel (Zero Password Fallback)
-                if not os.path.isfile('/usr/local/bin/cloudflared'):
-                    print("Setting up Cloudflare tunnel as direct zero-password fallback...")
-                    try:
-                        subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True)
-                        subprocess.run(['chmod', '+x', '/usr/local/bin/cloudflared'], check=True)
-                    except Exception as e:
-                        print(f"Notice: Could not download cloudflared: {e}")
-
-                def run_cf_tunnel():
-                    try:
-                        p = subprocess.Popen(['cloudflared', 'tunnel', '--url', f'http://127.0.0.1:{args.port}'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                        for line in p.stdout:
-                            match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
-                            if match:
-                                print(f"\n=======================================================")
-                                print(f"  CLOUDFLARE PUBLIC SHARE URL: {match.group(0)}")
-                                print(f"=======================================================\n")
-                    except Exception as ex:
-                        print(f"Cloudflare notice: {ex}")
-
-                threading.Thread(target=run_cf_tunnel, daemon=True).start()
+        threading.Thread(target=run_cf_tunnel, daemon=True).start()
 
     is_colab = os.path.exists('/content') or 'google.colab' in sys.modules
     if is_colab:
