@@ -1,4 +1,5 @@
 import os
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 import sys
 import re
 import urllib.parse
@@ -144,6 +145,90 @@ def load_audio(file_path):
             raise RuntimeError(f"Failed to decode audio file {file_path}: {e}")
         audio_np = np.frombuffer(raw_bytes, dtype=np.float32).reshape(-1, 2).T
         return torch.from_numpy(audio_np).float(), 44100
+
+
+def enhance_audio_adaptive(audio, generator, h, device):
+    """
+    Intelligently runs inference:
+    1. If the audio fits safely in GPU VRAM (e.g. RTX 5090 or audio <= ~35s on T4):
+       Runs in a single unchunked pass using their 100% official vanilla inference code.
+    2. If duration exceeds safe VRAM limit or on CUDA OOM:
+       Runs high-fidelity margin-chunked inference with 28s segments, 4s receptive margins,
+       and equal-power cosine crossfade, keeping peak VRAM under 10 GB on Colab T4.
+    """
+    total_samples = audio.shape[-1]
+    sr = h.sampling_rate
+    total_sec = total_samples / sr
+
+    # Determine safe single-pass duration based on GPU VRAM
+    max_safe_sec = 35.0  # Conservative default (Colab 15GB T4 fits ~35-40s)
+    if device.type == 'cuda' and torch.cuda.is_available():
+        try:
+            total_vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+            if total_vram_gb >= 28:
+                max_safe_sec = 105.0  # RTX 5090 (32GB)
+            elif total_vram_gb >= 22:
+                max_safe_sec = 75.0   # RTX 3090 / 4090 (24GB)
+            elif total_vram_gb >= 15:
+                max_safe_sec = 35.0   # Tesla T4 (Colab 15GB)
+            else:
+                max_safe_sec = 20.0   # 8-12GB GPUs
+        except Exception:
+            pass
+
+    if total_sec <= max_safe_sec:
+        try:
+            return enhance_audio(audio, generator, h, device)
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as oom_err:
+            if "out of memory" not in str(oom_err).lower() and not isinstance(oom_err, torch.cuda.OutOfMemoryError):
+                raise
+            torch.cuda.empty_cache()
+            print("VRAM limit reached during single pass. Falling back to high-fidelity margin chunking...")
+
+    # High-fidelity margin-based chunking
+    return enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=28.0, margin_sec=4.0, crossfade_sec=2.0)
+
+
+def enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=28.0, margin_sec=4.0, crossfade_sec=2.0):
+    sr = h.sampling_rate
+    channels, total_samples = audio.shape
+    seg_len = int(segment_sec * sr)
+    margin = int(margin_sec * sr)
+    crossfade = int(crossfade_sec * sr)
+    hop = seg_len - crossfade
+
+    fade_in = 0.5 * (1.0 - torch.cos(torch.linspace(0, np.pi, crossfade)))
+    fade_out = 0.5 * (1.0 + torch.cos(torch.linspace(0, np.pi, crossfade)))
+
+    output = torch.zeros_like(audio)
+    weights = torch.zeros(total_samples)
+
+    for start in range(0, total_samples, hop):
+        end = min(start + seg_len, total_samples)
+        valid_len = end - start
+
+        left_pad = min(start, margin)
+        right_pad = min(total_samples - end, margin)
+
+        chunk_start = start - left_pad
+        chunk_end = end + right_pad
+        chunk = audio[:, chunk_start:chunk_end]
+
+        enhanced = enhance_audio(chunk, generator, h, device)
+        valid_enhanced = enhanced[:, left_pad : left_pad + valid_len]
+
+        window = torch.ones(valid_len)
+        if start > 0:
+            window[:crossfade] = fade_in[:min(crossfade, valid_len)]
+        if end < total_samples:
+            window[-crossfade:] = fade_out[-min(crossfade, valid_len):]
+
+        output[:, start:end] += valid_enhanced * window
+        weights[start:end] += window
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
+    return output / weights.clamp(min=1e-6)
 
 
 def estimate_cutoff_frequency(audio_mono, sr, threshold_db=-85):
@@ -448,7 +533,7 @@ def api_process():
         with MODEL_LOCK:
             peak = audio_for_model.abs().max().clamp(min=1e-8)
             with torch.no_grad():
-                enhanced = enhance_audio(audio_for_model / peak, MODEL, CONFIG, DEVICE) * peak
+                enhanced = enhance_audio_adaptive(audio_for_model / peak, MODEL, CONFIG, DEVICE) * peak
 
         # Match official inference.py: if input sampling rate != model sampling rate,
         # resample back to input sampling rate and match original_length,
