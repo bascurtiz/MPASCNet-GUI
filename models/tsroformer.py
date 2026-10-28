@@ -97,8 +97,22 @@ class BandRoformerBlock(nn.Module):
         B, nband, N, T = input.shape
 
         output = input.permute(0, 3, 2, 1).contiguous().reshape(B * T, N, nband)
-        output = output + self.attention(output)
-        output = self.ffn(output)
+        
+        # Memory-efficient batched execution across independent time slices
+        total_items = B * T
+        chunk_size = 1024
+        if total_items > chunk_size and not self.training:
+            chunks = []
+            for i in range(0, total_items, chunk_size):
+                sub = output[i : i + chunk_size]
+                sub = sub + self.attention(sub)
+                sub = self.ffn(sub)
+                chunks.append(sub)
+            output = torch.cat(chunks, dim=0)
+        else:
+            output = output + self.attention(output)
+            output = self.ffn(output)
+
         output = output.reshape(B, T, N, nband).permute(0, 3, 2, 1).contiguous()
 
         return output
@@ -114,8 +128,22 @@ class TimeRoformerBlock(nn.Module):
         B, nband, N, T = input.shape
 
         output = input.contiguous().reshape(B * nband, N, T)
-        output = output + self.attention(output)
-        output = self.ffn(output)
+        
+        # Memory-efficient batched execution across independent frequency bands
+        total_items = B * nband
+        chunk_size = 8
+        if total_items > chunk_size and not self.training:
+            chunks = []
+            for i in range(0, total_items, chunk_size):
+                sub = output[i : i + chunk_size]
+                sub = sub + self.attention(sub)
+                sub = self.ffn(sub)
+                chunks.append(sub)
+            output = torch.cat(chunks, dim=0)
+        else:
+            output = output + self.attention(output)
+            output = self.ffn(output)
+
         output = output.reshape(B, nband, N, T)
 
         return output

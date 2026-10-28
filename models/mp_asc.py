@@ -70,6 +70,17 @@ class MPEncoderAttention(nn.Module):
         assert pha_feature.shape == mag_feature.shape
         assert N == self.branch_dim
 
+        chunk_size = 1024
+        if B > chunk_size and not self.training:
+            chunks = []
+            for i in range(0, B, chunk_size):
+                chunks.append(self._forward_chunk(mag_feature[i : i + chunk_size], pha_feature[i : i + chunk_size]))
+            return torch.cat(chunks, dim=0)
+        return self._forward_chunk(mag_feature, pha_feature)
+
+    def _forward_chunk(self, mag_feature, pha_feature):
+        B, L, N = mag_feature.shape
+
         routing = torch.cat((mag_feature, pha_feature), dim=-1)
         routing = self.input_norm(routing.transpose(1, 2)).transpose(1, 2).contiguous()
 
@@ -147,6 +158,19 @@ class MPDecoderAttention(nn.Module):
         B, L, N = input.shape
         assert L == self.nband
         assert N == self.inner_dim
+
+        chunk_size = 1024
+        if B > chunk_size and not self.training:
+            chunks_mag, chunks_pha = [], []
+            for i in range(0, B, chunk_size):
+                m, p = self._forward_chunk(input[i : i + chunk_size])
+                chunks_mag.append(m)
+                chunks_pha.append(p)
+            return torch.cat(chunks_mag, dim=0), torch.cat(chunks_pha, dim=0)
+        return self._forward_chunk(input)
+
+    def _forward_chunk(self, input):
+        B, L, N = input.shape
 
         input = self.input_norm(input.transpose(1, 2)).transpose(1, 2).contiguous()
 

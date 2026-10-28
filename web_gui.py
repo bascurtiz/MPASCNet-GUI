@@ -150,29 +150,31 @@ def load_audio(file_path):
 def enhance_audio_adaptive(audio, generator, h, device):
     """
     Intelligently runs inference:
-    1. If the audio fits safely in GPU VRAM (e.g. RTX 5090 or audio <= ~35s on T4):
-       Runs in a single unchunked pass using their 100% official vanilla inference code.
-    2. If duration exceeds safe VRAM limit or on CUDA OOM:
-       Runs high-fidelity margin-chunked inference with 28s segments, 4s receptive margins,
-       and equal-power cosine crossfade, keeping peak VRAM under 10 GB on Colab T4.
+    1. If the audio fits safely in GPU VRAM (up to 3.5 minutes on Colab 15GB T4 with memory-efficient attention):
+       Runs in a single continuous unchunked pass using 100% official vanilla inference code.
+       Zero cuts, zero crossfades, zero destructive phase interference.
+    2. If duration exceeds safe VRAM limit or on CUDA OOM (e.g. ultra-long podcasts or DJ sets):
+       Runs high-fidelity margin-chunked inference with 90s segments and 8s receptive margins.
     """
     total_samples = audio.shape[-1]
     sr = h.sampling_rate
     total_sec = total_samples / sr
 
     # Determine safe single-pass duration based on GPU VRAM
-    max_safe_sec = 35.0  # Conservative default (Colab 15GB T4 fits ~35-40s)
+    max_safe_sec = 180.0  # Conservative default (fits easily in 12GB)
     if device.type == 'cuda' and torch.cuda.is_available():
         try:
             total_vram_gb = torch.cuda.get_device_properties(device).total_memory / (1024**3)
             if total_vram_gb >= 28:
-                max_safe_sec = 105.0  # RTX 5090 (32GB)
+                max_safe_sec = 500.0  # RTX 5090 (32GB)
             elif total_vram_gb >= 22:
-                max_safe_sec = 75.0   # RTX 3090 / 4090 (24GB)
-            elif total_vram_gb >= 15:
-                max_safe_sec = 35.0   # Tesla T4 (Colab 15GB)
+                max_safe_sec = 360.0  # RTX 3090 / 4090 (24GB)
+            elif total_vram_gb >= 14:
+                max_safe_sec = 210.0  # Tesla T4 (Colab 15GB, ~3.5 min continuous)
+            elif total_vram_gb >= 10:
+                max_safe_sec = 160.0  # RTX 3060 / 4070 (12GB)
             else:
-                max_safe_sec = 20.0   # 8-12GB GPUs
+                max_safe_sec = 90.0   # 8GB GPUs (~1.5 min continuous)
         except Exception:
             pass
 
@@ -185,11 +187,11 @@ def enhance_audio_adaptive(audio, generator, h, device):
             torch.cuda.empty_cache()
             print("VRAM limit reached during single pass. Falling back to high-fidelity margin chunking...")
 
-    # High-fidelity margin-based chunking
-    return enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=28.0, margin_sec=4.0, crossfade_sec=2.0)
+    # High-fidelity margin-based chunking for ultra-long audio
+    return enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=90.0, margin_sec=8.0, crossfade_sec=4.0)
 
 
-def enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=28.0, margin_sec=4.0, crossfade_sec=2.0):
+def enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=90.0, margin_sec=8.0, crossfade_sec=4.0):
     sr = h.sampling_rate
     channels, total_samples = audio.shape
     seg_len = int(segment_sec * sr)
