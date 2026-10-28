@@ -621,8 +621,12 @@
               <input type="checkbox" id="preview-mode">
               <span><strong>Fast Preview:</strong> Process first 30 seconds only</span>
             </label>
+            <label class="switch-label">
+              <input type="checkbox" id="keep-44k">
+              <span><strong>Export 44.1 kHz:</strong> Keep full 44.1 kHz sample rate instead of matching input sample rate</span>
+            </label>
             <p style="font-size: 12px; color: var(--text-dim);">
-              Seamless overlap-add chunking is active. Even 5+ minute full-length songs can be restored without running out of GPU memory.
+              Vanilla MPASCNet engine active. Processing adheres 1:1 to official Xinghour implementation with full phase-aware preservation and zero chunking artifacts.
             </p>
           </div>
         </div>
@@ -754,6 +758,7 @@
     const fileLabel = document.getElementById('file-label');
     const localPathInput = document.getElementById('local-path-input');
     const previewModeCheck = document.getElementById('preview-mode');
+    const keep44kCheck = document.getElementById('keep-44k');
     const btnProcess = document.getElementById('btn-process');
     const progressBox = document.getElementById('progress-box');
     const progressFill = document.getElementById('progress-fill');
@@ -866,6 +871,7 @@
       if (selectedFile) formData.append('file', selectedFile);
       if (localPath) formData.append('local_path', localPath);
       formData.append('preview_mode', previewModeCheck.checked ? 'true' : 'false');
+      formData.append('keep_44k', keep44kCheck && keep44kCheck.checked ? 'true' : 'false');
 
       fetch('/api/process', {
         method: 'POST',

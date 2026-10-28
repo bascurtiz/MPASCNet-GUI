@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from env import AttrDict
 from models.wapper import MPASCNet
 from utils import load_checkpoint
-from data.dataset import mag_pha_stft, mag_pha_istft
+from inference import enhance_audio, stft_audio, istft_audio
 
 # Configuration
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -107,7 +107,7 @@ def init_model():
     # Warmup pass
     try:
         dummy = torch.zeros(2, CONFIG.sampling_rate * 2)
-        enhance_audio_chunk(dummy, model, CONFIG, DEVICE)
+        enhance_audio(dummy, model, CONFIG, DEVICE)
         print("Warmup pass completed.")
     except Exception as e:
         print(f"Warmup notice: {e}")
@@ -116,7 +116,14 @@ def init_model():
 
 
 def load_audio(file_path):
-    """Loads any audio file robustly using soundfile or ffmpeg fallback."""
+    """Loads any audio file using torchaudio first (their standard pipeline), with soundfile / ffmpeg fallback."""
+    import torchaudio
+    try:
+        audio, sr = torchaudio.load(file_path)
+        return audio.float(), sr
+    except Exception:
+        pass
+
     try:
         data, sr = sf.read(file_path)
         if data.ndim == 1:
@@ -137,82 +144,6 @@ def load_audio(file_path):
             raise RuntimeError(f"Failed to decode audio file {file_path}: {e}")
         audio_np = np.frombuffer(raw_bytes, dtype=np.float32).reshape(-1, 2).T
         return torch.from_numpy(audio_np).float(), 44100
-
-
-def stft_audio(audio, h):
-    B, C, T = audio.shape
-    audio = audio.reshape(B * C, T)
-    mag, pha, com = mag_pha_stft(audio, h.n_fft, h.hop_size, h.win_size, h.compress_factor)
-    return mag, pha, com
-
-
-def istft_audio(mag, pha, h, shape):
-    batch_size, channels, length = shape
-    audio = mag_pha_istft(mag, pha, h.n_fft, h.hop_size, h.win_size, h.compress_factor, length=length)
-    audio = audio.reshape(batch_size, channels, audio.shape[-1])
-    return audio
-
-
-def enhance_audio_chunk(audio, generator, h, device):
-    """Enhance a single chunk of audio."""
-    audio = audio.unsqueeze(0).to(device)
-    batch_size, channels, length = audio.shape
-    mag, pha, _ = stft_audio(audio, h)
-    mag_g, pha_g, _ = generator(mag, pha)
-    audio_g = istft_audio(mag_g, pha_g, h, (batch_size, channels, length))
-    return audio_g.squeeze(0).detach().cpu()
-
-
-def enhance_audio_full(audio, generator, h, device, chunk_sec=8.0, overlap_sec=1.0):
-    """
-    Enhances full audio using seamless overlap-add crossfade.
-    Guarantees fixed low VRAM usage regardless of audio duration.
-    """
-    sr = h.sampling_rate
-    channels, total_samples = audio.shape
-    chunk_len = int(chunk_sec * sr)
-    overlap = int(overlap_sec * sr)
-    hop = chunk_len - overlap
-
-    if total_samples <= chunk_len + overlap:
-        # Short audio: run in a single pass
-        return enhance_audio_chunk(audio, generator, h, device)
-
-    # Window for overlap-add crossfading
-    fade_in = torch.linspace(0.0, 1.0, overlap)
-    fade_out = torch.linspace(1.0, 0.0, overlap)
-    window = torch.ones(chunk_len)
-    window[:overlap] = fade_in
-    window[-overlap:] = fade_out
-
-    output = torch.zeros_like(audio)
-    weights = torch.zeros(total_samples)
-
-    for start in range(0, total_samples, hop):
-        end = min(start + chunk_len, total_samples)
-        cur_len = end - start
-
-        chunk = audio[:, start:end]
-        if cur_len < chunk_len:
-            # Pad chunk to chunk_len for STFT consistency
-            pad_amount = chunk_len - cur_len
-            chunk = F.pad(chunk, (0, pad_amount))
-
-        enhanced_chunk = enhance_audio_chunk(chunk, generator, h, device)
-        enhanced_chunk = enhanced_chunk[:, :cur_len]
-
-        cur_window = window[:cur_len].clone()
-        if start == 0:
-            cur_window[:overlap] = 1.0
-        if end == total_samples:
-            cur_window[-min(overlap, cur_len):] = 1.0
-
-        output[:, start:end] += enhanced_chunk * cur_window
-        weights[start:end] += cur_window
-
-    weights = weights.clamp(min=1e-6)
-    output = output / weights
-    return output
 
 
 def estimate_cutoff_frequency(audio_mono, sr, threshold_db=-85):
@@ -373,27 +304,33 @@ def generate_spek_spectrogram(audio_np, sr, title, meta_info, out_path, is_resto
     plt.close(fig)
 
 
-def generate_waveform_plot(audio_orig, audio_rest, sr, out_path):
+def generate_waveform_plot(audio_orig, audio_rest, sr_orig, sr_rest, out_path):
     """Renders high-fidelity dual waveform comparison (Before vs After)."""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 3.8), dpi=110, facecolor='#121316', sharex=True)
 
-    t = np.linspace(0, audio_orig.shape[-1] / sr, audio_orig.shape[-1])
-    # Downsample for rendering speed if very large
+    t1 = np.linspace(0, audio_orig.shape[-1] / sr_orig, audio_orig.shape[-1])
+    t2 = np.linspace(0, audio_rest.shape[-1] / sr_rest, audio_rest.shape[-1])
+
     max_pts = 100000
-    if len(t) > max_pts:
-        step = len(t) // max_pts
-        t = t[::step]
-        orig_plot = audio_orig[:, ::step].numpy()
-        rest_plot = audio_rest[:, ::step].numpy()
+    if len(t1) > max_pts:
+        step1 = len(t1) // max_pts
+        t1 = t1[::step1]
+        orig_plot = audio_orig[:, ::step1].numpy()
     else:
         orig_plot = audio_orig.numpy()
+
+    if len(t2) > max_pts:
+        step2 = len(t2) // max_pts
+        t2 = t2[::step2]
+        rest_plot = audio_rest[:, ::step2].numpy()
+    else:
         rest_plot = audio_rest.numpy()
 
     # Original Waveform
     ax1.set_facecolor('#0f1115')
-    ax1.plot(t, orig_plot[0], color='#00DFF8', alpha=0.9, linewidth=0.6, label='Left Channel')
+    ax1.plot(t1, orig_plot[0], color='#00DFF8', alpha=0.9, linewidth=0.6, label='Left Channel')
     if orig_plot.shape[0] > 1:
-        ax1.plot(t, orig_plot[1], color='#5be9fb', alpha=0.65, linewidth=0.5, label='Right Channel')
+        ax1.plot(t1, orig_plot[1], color='#5be9fb', alpha=0.65, linewidth=0.5, label='Right Channel')
     ax1.set_ylim(-1.05, 1.05)
     ax1.set_ylabel('Original', color='#00DFF8', fontsize=10, fontweight='bold')
     ax1.grid(True, color='#2d3748', alpha=0.5, linestyle=':')
@@ -403,9 +340,9 @@ def generate_waveform_plot(audio_orig, audio_rest, sr, out_path):
 
     # Restored Waveform
     ax2.set_facecolor('#0f1115')
-    ax2.plot(t, rest_plot[0], color='#20c997', alpha=0.85, linewidth=0.6, label='Left Channel')
+    ax2.plot(t2, rest_plot[0], color='#20c997', alpha=0.85, linewidth=0.6, label='Left Channel')
     if rest_plot.shape[0] > 1:
-        ax2.plot(t, rest_plot[1], color='#38d9a9', alpha=0.65, linewidth=0.5, label='Right Channel')
+        ax2.plot(t2, rest_plot[1], color='#38d9a9', alpha=0.65, linewidth=0.5, label='Right Channel')
     ax2.set_ylim(-1.05, 1.05)
     ax2.set_ylabel('Restored', color='#20c997', fontsize=10, fontweight='bold')
     ax2.grid(True, color='#2d3748', alpha=0.5, linestyle=':')
@@ -414,7 +351,7 @@ def generate_waveform_plot(audio_orig, audio_rest, sr, out_path):
         spine.set_color('#2d3748')
 
     # Time ticks
-    total_sec = audio_orig.shape[-1] / sr
+    total_sec = max(audio_orig.shape[-1] / sr_orig, audio_rest.shape[-1] / sr_rest)
     step_time = 5 if total_sec <= 30 else (10 if total_sec <= 60 else (30 if total_sec <= 300 else 60))
     xticks = np.arange(0, total_sec + 0.1, step_time)
     ax2.set_xticks(xticks)
@@ -462,6 +399,7 @@ def api_process():
     file = request.files.get('file')
     local_path = request.form.get('local_path', '').strip()
     preview_mode = request.form.get('preview_mode', 'false').lower() == 'true'
+    keep_44k = request.form.get('keep_44k', 'false').lower() == 'true'
 
     if not file and not local_path:
         return jsonify({"error": "No audio file or local path provided."}), 400
@@ -483,20 +421,16 @@ def api_process():
     try:
         start_time = time.time()
 
-        # 1. Load Audio
+        # 1. Load Audio (strictly using official pipeline with robust fallback)
         audio, sr = load_audio(input_save_path)
         orig_sr = sr
         channels = audio.shape[0]
-
-        # Resample to 44.1 kHz if necessary
-        if sr != CONFIG.sampling_rate:
-            import torchaudio
-            audio = torchaudio.functional.resample(audio, sr, CONFIG.sampling_rate)
-            sr = CONFIG.sampling_rate
+        original_length = audio.shape[-1]
 
         # Preview mode: slice first 30 seconds
         if preview_mode and audio.shape[-1] > sr * 30:
             audio = audio[:, :sr * 30]
+            original_length = audio.shape[-1]
 
         total_duration = audio.shape[-1] / sr
 
@@ -504,13 +438,32 @@ def api_process():
         audio_mono = audio.mean(dim=0).numpy()
         orig_cutoff = estimate_cutoff_frequency(audio_mono, sr)
 
-        # 2. Run MPASCNet Enhancement
-        with MODEL_LOCK:
-            peak = audio.abs().max().clamp(min=1e-8)
-            with torch.no_grad():
-                enhanced = enhance_audio_full(audio / peak, MODEL, CONFIG, DEVICE) * peak
-            enhanced = enhanced.clamp(-1.0, 1.0)
+        # 2. Run MPASCNet Enhancement - Exact official inference.py pipeline
+        import torchaudio
+        if sr != CONFIG.sampling_rate:
+            audio_for_model = torchaudio.functional.resample(audio, sr, CONFIG.sampling_rate)
+        else:
+            audio_for_model = audio
 
+        with MODEL_LOCK:
+            peak = audio_for_model.abs().max().clamp(min=1e-8)
+            with torch.no_grad():
+                enhanced = enhance_audio(audio_for_model / peak, MODEL, CONFIG, DEVICE) * peak
+
+        # Match official inference.py: if input sampling rate != model sampling rate,
+        # resample back to input sampling rate and match original_length,
+        # unless user explicitly asked to keep 44.1 kHz.
+        if sr != CONFIG.sampling_rate and not keep_44k:
+            enhanced = torchaudio.functional.resample(enhanced, CONFIG.sampling_rate, sr)
+            if enhanced.shape[-1] >= original_length:
+                enhanced = enhanced[..., :original_length]
+            else:
+                enhanced = F.pad(enhanced, (0, original_length - enhanced.shape[-1]))
+            out_sr = sr
+        else:
+            out_sr = CONFIG.sampling_rate if sr != CONFIG.sampling_rate and keep_44k else sr
+
+        enhanced = enhanced.clamp(-1.0, 1.0)
         process_time = time.time() - start_time
 
         # 3. Export Audio Files
@@ -521,8 +474,8 @@ def api_process():
         orig_wav_path = os.path.join(OUTPUT_DIR, f"{session_id}_orig.wav")
         rest_wav_path = os.path.join(OUTPUT_DIR, f"{session_id}_{download_filename}")
 
-        sf.write(orig_wav_path, audio.T.numpy(), sr)
-        sf.write(rest_wav_path, enhanced.T.numpy(), sr)
+        torchaudio.save(orig_wav_path, audio.clamp(-1.0, 1.0), sr)
+        torchaudio.save(rest_wav_path, enhanced, out_sr)
 
         # 4. Generate Spek Spectrograms
         spek_orig_png = os.path.join(OUTPUT_DIR, f"{session_id}_spek_orig.png")
@@ -531,13 +484,13 @@ def api_process():
 
         min_sec_str = f"{int(total_duration // 60):02d}:{int(total_duration % 60):02d}"
         meta_orig = f"Original Audio • {min_sec_str} • {channels}ch • {orig_sr} Hz • Cutoff: ~{orig_cutoff/1000.0:.1f} kHz"
-        meta_rest = f"MPASCNet Restored • {min_sec_str} • {channels}ch • {sr} Hz • Restored Bandwidth: 22.05 kHz"
+        meta_rest = f"MPASCNet Restored • {min_sec_str} • {channels}ch • {out_sr} Hz • Restored Bandwidth: {out_sr/2000.0:.2f} kHz"
 
         generate_spek_spectrogram(audio.numpy(), sr, f"Original: {orig_filename}", meta_orig, spek_orig_png, is_restored=False)
-        generate_spek_spectrogram(enhanced.numpy(), sr, f"Restored: {orig_filename}", meta_rest, spek_rest_png, is_restored=True)
+        generate_spek_spectrogram(enhanced.numpy(), out_sr, f"Restored: {orig_filename}", meta_rest, spek_rest_png, is_restored=True)
 
         # 5. Generate Waveform Plot
-        generate_waveform_plot(audio, enhanced, sr, waveform_png)
+        generate_waveform_plot(audio, enhanced, sr, out_sr, waveform_png)
 
         return jsonify({
             "success": True,
@@ -547,9 +500,9 @@ def api_process():
             "duration_sec": round(total_duration, 2),
             "duration_formatted": min_sec_str,
             "channels": channels,
-            "sample_rate": sr,
+            "sample_rate": out_sr,
             "orig_cutoff_khz": round(orig_cutoff / 1000.0, 1),
-            "restored_bandwidth_khz": 22.05,
+            "restored_bandwidth_khz": round(out_sr / 2000.0, 2),
             "process_time_sec": round(process_time, 2),
             "orig_audio_url": f"/api/audio/{os.path.basename(orig_wav_path)}",
             "rest_audio_url": f"/api/audio/{os.path.basename(rest_wav_path)}",
