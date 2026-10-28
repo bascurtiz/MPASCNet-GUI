@@ -123,11 +123,22 @@ def get_audio_files(input_path):
     return sorted(audio_files)
 
 
-def enhance_audio(audio, generator, h, device):
+def enhance_audio(audio, generator, h, device, progress_cb=None):
     audio = audio.unsqueeze(0).to(device)
     batch_size, channels, length = audio.shape
+    if progress_cb:
+        progress_cb(10, "STFT: Computing complex spectrogram...")
     mag, pha, _ = stft_audio(audio, h)
-    mag_g, pha_g, _ = generator(mag, pha)
+
+    import inspect
+    sig = inspect.signature(generator.forward)
+    if 'progress_cb' in sig.parameters:
+        mag_g, pha_g, _ = generator(mag, pha, progress_cb=progress_cb)
+    else:
+        mag_g, pha_g, _ = generator(mag, pha)
+
+    if progress_cb:
+        progress_cb(82, "iSTFT: Reconstructing audio waveform...")
     audio_g = istft_audio(mag_g, pha_g, h, (batch_size, channels, length))
 
     return audio_g.squeeze(0).detach().cpu()

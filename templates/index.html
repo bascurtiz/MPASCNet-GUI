@@ -762,6 +762,7 @@
     const btnProcess = document.getElementById('btn-process');
     const progressBox = document.getElementById('progress-box');
     const progressFill = document.getElementById('progress-fill');
+    const progressStatusText = document.getElementById('progress-status-text');
     const elapsedTime = document.getElementById('elapsed-time');
     const queueStatus = document.getElementById('queue-status');
 
@@ -795,6 +796,8 @@
     let currentSource = 'B'; // 'A' = Original, 'B' = Restored
     let isPlaying = false;
     let timerInterval = null;
+    let pollInterval = null;
+    let animInterval = null;
 
     // Fetch initial status
     fetch('/api/status')
@@ -853,21 +856,52 @@
 
       btnProcess.disabled = true;
       progressBox.style.display = 'block';
-      progressFill.style.width = '20%';
+      progressFill.style.width = '3%';
+      progressStatusText.innerText = 'Initializing...';
       queueStatus.innerText = 'Processing with MPASCNet...';
 
       let seconds = 0;
       elapsedTime.innerText = '0s';
       clearInterval(timerInterval);
+      clearInterval(pollInterval);
+      clearInterval(animInterval);
+
       timerInterval = setInterval(() => {
         seconds++;
         elapsedTime.innerText = seconds + 's';
-        if (seconds < 25) {
-          progressFill.style.width = `${Math.min(90, 20 + seconds * 3)}%`;
-        }
       }, 1000);
 
+      const sessionId = 'job_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+
+      let targetProgress = 3;
+      let currentProgress = 3;
+
+      // Real-time progress polling from backend
+      pollInterval = setInterval(() => {
+        fetch(`/api/progress/${sessionId}`)
+          .then(r => r.json())
+          .then(data => {
+            if (data && typeof data.percent === 'number' && data.percent > targetProgress) {
+              targetProgress = data.percent;
+            }
+            if (data && data.status) {
+              progressStatusText.innerText = data.status;
+            }
+          })
+          .catch(() => {});
+      }, 400);
+
+      // Smooth progress animation ticker (glides towards targetProgress)
+      animInterval = setInterval(() => {
+        if (currentProgress < targetProgress) {
+          currentProgress += Math.max(0.3, (targetProgress - currentProgress) * 0.15);
+          if (currentProgress > targetProgress) currentProgress = targetProgress;
+          progressFill.style.width = `${currentProgress.toFixed(1)}%`;
+        }
+      }, 100);
+
       const formData = new FormData();
+      formData.append('session_id', sessionId);
       if (selectedFile) formData.append('file', selectedFile);
       if (localPath) formData.append('local_path', localPath);
       formData.append('preview_mode', previewModeCheck.checked ? 'true' : 'false');
@@ -880,8 +914,15 @@
       .then(r => r.json())
       .then(res => {
         clearInterval(timerInterval);
-        btnProcess.disabled = false;
-        progressBox.style.display = 'none';
+        clearInterval(pollInterval);
+        clearInterval(animInterval);
+        progressFill.style.width = '100%';
+        progressStatusText.innerText = 'Complete!';
+
+        setTimeout(() => {
+          btnProcess.disabled = false;
+          progressBox.style.display = 'none';
+        }, 500);
 
         if (res.error) {
           alert("Error: " + res.error);
@@ -894,6 +935,8 @@
       })
       .catch(err => {
         clearInterval(timerInterval);
+        clearInterval(pollInterval);
+        clearInterval(animInterval);
         btnProcess.disabled = false;
         progressBox.style.display = 'none';
         alert("Request failed: " + err);

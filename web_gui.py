@@ -147,7 +147,7 @@ def load_audio(file_path):
         return torch.from_numpy(audio_np).float(), 44100
 
 
-def enhance_audio_adaptive(audio, generator, h, device):
+def enhance_audio_adaptive(audio, generator, h, device, progress_cb=None):
     """
     Intelligently runs inference:
     1. If the audio fits safely in GPU VRAM (up to 3.5 minutes on Colab 15GB T4 with memory-efficient attention):
@@ -180,7 +180,7 @@ def enhance_audio_adaptive(audio, generator, h, device):
 
     if total_sec <= max_safe_sec:
         try:
-            return enhance_audio(audio, generator, h, device)
+            return enhance_audio(audio, generator, h, device, progress_cb=progress_cb)
         except (torch.cuda.OutOfMemoryError, RuntimeError) as oom_err:
             if "out of memory" not in str(oom_err).lower() and not isinstance(oom_err, torch.cuda.OutOfMemoryError):
                 raise
@@ -188,10 +188,10 @@ def enhance_audio_adaptive(audio, generator, h, device):
             print("VRAM limit reached during single pass. Falling back to high-fidelity margin chunking...")
 
     # High-fidelity margin-based chunking for ultra-long audio
-    return enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=90.0, margin_sec=8.0, crossfade_sec=4.0)
+    return enhance_audio_margin_chunked(audio, generator, h, device, progress_cb=progress_cb, segment_sec=90.0, margin_sec=8.0, crossfade_sec=4.0)
 
 
-def enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=90.0, margin_sec=8.0, crossfade_sec=4.0):
+def enhance_audio_margin_chunked(audio, generator, h, device, progress_cb=None, segment_sec=90.0, margin_sec=8.0, crossfade_sec=4.0):
     sr = h.sampling_rate
     channels, total_samples = audio.shape
     seg_len = int(segment_sec * sr)
@@ -205,7 +205,10 @@ def enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=90.0, 
     output = torch.zeros_like(audio)
     weights = torch.zeros(total_samples)
 
-    for start in range(0, total_samples, hop):
+    chunks_range = list(range(0, total_samples, hop))
+    total_chunks = len(chunks_range)
+
+    for chunk_idx, start in enumerate(chunks_range):
         end = min(start + seg_len, total_samples)
         valid_len = end - start
 
@@ -215,6 +218,10 @@ def enhance_audio_margin_chunked(audio, generator, h, device, segment_sec=90.0, 
         chunk_start = start - left_pad
         chunk_end = end + right_pad
         chunk = audio[:, chunk_start:chunk_end]
+
+        if progress_cb:
+            pct = 15 + int(((chunk_idx + 1) / total_chunks) * 65)
+            progress_cb(pct, f"Processing chunk {chunk_idx + 1}/{total_chunks}...")
 
         enhanced = enhance_audio(chunk, generator, h, device)
         valid_enhanced = enhanced[:, left_pad : left_pad + valid_len]
@@ -461,6 +468,34 @@ def index():
     return render_template('index.html')
 
 
+# Job Progress Tracker
+JOB_PROGRESS = {}
+JOB_LOCK = threading.Lock()
+
+
+def update_job_progress(session_id, percent, status):
+    if not session_id:
+        return
+    with JOB_LOCK:
+        now = time.time()
+        # Clean up stale job progress older than 15 minutes
+        stale_keys = [k for k, v in JOB_PROGRESS.items() if now - v.get('updated_at', now) > 900]
+        for k in stale_keys:
+            JOB_PROGRESS.pop(k, None)
+        JOB_PROGRESS[session_id] = {
+            "percent": int(percent),
+            "status": status,
+            "updated_at": now
+        }
+
+
+@app.route('/api/progress/<session_id>', methods=['GET'])
+def api_progress(session_id):
+    with JOB_LOCK:
+        info = JOB_PROGRESS.get(session_id, {"percent": 0, "status": "Initializing..."})
+    return jsonify(info)
+
+
 @app.route('/api/status')
 def api_status():
     cuda_avail = torch.cuda.is_available()
@@ -491,7 +526,8 @@ def api_process():
     if not file and not local_path:
         return jsonify({"error": "No audio file or local path provided."}), 400
 
-    session_id = str(uuid.uuid4())[:8]
+    session_id = request.form.get('session_id') or str(uuid.uuid4())[:8]
+    update_job_progress(session_id, 3, "Uploading & reading audio...")
 
     # Save or locate source audio
     if file:
@@ -501,12 +537,14 @@ def api_process():
         file.save(input_save_path)
     else:
         if not os.path.isfile(local_path):
+            update_job_progress(session_id, 0, f"Local file not found: {local_path}")
             return jsonify({"error": f"Local file not found: {local_path}"}), 404
         orig_filename = os.path.basename(local_path)
         input_save_path = local_path
 
     try:
         start_time = time.time()
+        update_job_progress(session_id, 6, "Loading audio into memory...")
 
         # 1. Load Audio (strictly using official pipeline with robust fallback)
         audio, sr = load_audio(input_save_path)
@@ -520,6 +558,7 @@ def api_process():
             original_length = audio.shape[-1]
 
         total_duration = audio.shape[-1] / sr
+        update_job_progress(session_id, 10, "Estimating high-frequency cutoff...")
 
         # Estimate original cutoff frequency (Spek style)
         audio_mono = audio.mean(dim=0).numpy()
@@ -528,14 +567,18 @@ def api_process():
         # 2. Run MPASCNet Enhancement - Exact official inference.py pipeline
         import torchaudio
         if sr != CONFIG.sampling_rate:
+            update_job_progress(session_id, 12, "Resampling audio to 44.1 kHz...")
             audio_for_model = torchaudio.functional.resample(audio, sr, CONFIG.sampling_rate)
         else:
             audio_for_model = audio
 
+        def model_progress(pct, msg):
+            update_job_progress(session_id, pct, msg)
+
         with MODEL_LOCK:
             peak = audio_for_model.abs().max().clamp(min=1e-8)
             with torch.no_grad():
-                enhanced = enhance_audio_adaptive(audio_for_model / peak, MODEL, CONFIG, DEVICE) * peak
+                enhanced = enhance_audio_adaptive(audio_for_model / peak, MODEL, CONFIG, DEVICE, progress_cb=model_progress) * peak
 
         # Match official inference.py: if input sampling rate != model sampling rate,
         # resample back to input sampling rate and match original_length,
@@ -554,6 +597,7 @@ def api_process():
         process_time = time.time() - start_time
 
         # 3. Export Audio Files
+        update_job_progress(session_id, 86, "Saving restored WAV file...")
         base_name = os.path.splitext(orig_filename)[0]
         safe_base = re.sub(r'[\\/*?:"<>|]', '_', base_name).strip() or "audio"
         download_filename = f"{safe_base}_restored.wav"
@@ -573,11 +617,17 @@ def api_process():
         meta_orig = f"Original Audio • {min_sec_str} • {channels}ch • {orig_sr} Hz • Cutoff: ~{orig_cutoff/1000.0:.1f} kHz"
         meta_rest = f"MPASCNet Restored • {min_sec_str} • {channels}ch • {out_sr} Hz • Restored Bandwidth: {out_sr/2000.0:.2f} kHz"
 
+        update_job_progress(session_id, 90, "Rendering Spek spectrogram (Original)...")
         generate_spek_spectrogram(audio.numpy(), sr, f"Original: {orig_filename}", meta_orig, spek_orig_png, is_restored=False)
+
+        update_job_progress(session_id, 94, "Rendering Spek spectrogram (Restored)...")
         generate_spek_spectrogram(enhanced.numpy(), out_sr, f"Restored: {orig_filename}", meta_rest, spek_rest_png, is_restored=True)
 
         # 5. Generate Waveform Plot
+        update_job_progress(session_id, 97, "Rendering waveform comparison...")
         generate_waveform_plot(audio, enhanced, sr, out_sr, waveform_png)
+
+        update_job_progress(session_id, 100, "Processing complete!")
 
         return jsonify({
             "success": True,
