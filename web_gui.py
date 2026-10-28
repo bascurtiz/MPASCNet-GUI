@@ -7,13 +7,22 @@ import subprocess
 import threading
 import numpy as np
 import soundfile as sf
+import logging
+# Suppress noisy font lookup warnings in headless/cloud/Colab environments
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+logging.getLogger('matplotlib').setLevel(logging.ERROR)
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-# GitHub font stack for all plot typography
+# Typography font stack (Windows Segoe UI, macOS SF, Linux DejaVu Sans)
 matplotlib.rcParams['font.family'] = 'sans-serif'
-matplotlib.rcParams['font.sans-serif'] = ['Segoe UI', 'Noto Sans', 'Helvetica Neue', 'Arial', 'sans-serif']
-matplotlib.rcParams['font.monospace'] = ['Consolas', 'SF Mono', 'Menlo', 'Liberation Mono', 'monospace']
+matplotlib.rcParams['font.sans-serif'] = [
+    'DejaVu Sans', 'Segoe UI', 'Noto Sans', 'Liberation Sans', 'Helvetica Neue', 'Arial', 'sans-serif'
+]
+matplotlib.rcParams['font.monospace'] = [
+    'DejaVu Sans Mono', 'Consolas', 'SF Mono', 'Menlo', 'Liberation Mono', 'monospace'
+]
 from matplotlib.colors import LinearSegmentedColormap
 from scipy import signal
 import torch
@@ -302,7 +311,7 @@ def generate_spek_spectrogram(audio_np, sr, title, meta_info, out_path, is_resto
     cbar_levels = np.linspace(1.0, 0.0, 256).reshape(-1, 1)
     cbar_rgb = spek_spectrum_rgb(cbar_levels)
 
-    fig = plt.figure(figsize=(11, 7.6), dpi=130, facecolor='#000000')
+    fig = plt.figure(figsize=(11, 7.6), dpi=110, facecolor='#000000')
     ax = fig.add_axes([0.07, 0.09, 0.83, 0.82])
     cax = fig.add_axes([0.915, 0.09, 0.018, 0.82])
 
@@ -356,7 +365,7 @@ def generate_spek_spectrogram(audio_np, sr, title, meta_info, out_path, is_resto
 
 def generate_waveform_plot(audio_orig, audio_rest, sr, out_path):
     """Renders high-fidelity dual waveform comparison (Before vs After)."""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 3.8), dpi=130, facecolor='#121316', sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 3.8), dpi=110, facecolor='#121316', sharex=True)
 
     t = np.linspace(0, audio_orig.shape[-1] / sr, audio_orig.shape[-1])
     # Downsample for rendering speed if very large
@@ -408,6 +417,11 @@ def generate_waveform_plot(audio_orig, audio_rest, sr, out_path):
 
 
 # Routes
+@app.route('/favicon.ico')
+def favicon():
+    return ('', 204)
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -556,38 +570,102 @@ if __name__ == '__main__':
     import re
     parser = argparse.ArgumentParser(description="MPASCNet Web GUI")
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 7860)), help="Port to listen on")
-    parser.add_argument('--share', action='store_true', help="Create a public Cloudflare tunnel link (useful for Google Colab)")
+    parser.add_argument('--share', action='store_true', help="Create public tunnel links (localtunnel + Cloudflare)")
+    parser.add_argument('--subdomain', type=str, default='mpascnet', help="Custom subdomain for localtunnel (e.g. mpascnet -> https://mpascnet.loca.lt)")
+    parser.add_argument('--tunnel-token', type=str, default=os.environ.get('TUNNEL_TOKEN', ''), help="Cloudflare Named Tunnel token for custom domain (e.g. mpascnet.keybpm.info)")
     args = parser.parse_args()
 
     init_model()
 
-    if args.share:
+    if args.share or args.tunnel_token:
         # Tunnel support (Colab / Linux)
         if sys.platform.startswith('linux'):
+            # Download cloudflared if needed
             if not os.path.isfile('/usr/local/bin/cloudflared'):
-                print("Setting up Cloudflare tunnel for Colab public sharing...")
+                print("Setting up cloudflared for public tunneling...")
                 try:
                     subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True)
                     subprocess.run(['chmod', '+x', '/usr/local/bin/cloudflared'], check=True)
                 except Exception as e:
                     print(f"Notice: Could not download cloudflared: {e}")
 
-            def run_tunnel():
-                try:
-                    p = subprocess.Popen(['cloudflared', 'tunnel', '--url', f'http://127.0.0.1:{args.port}'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-                    for line in p.stdout:
-                        match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
-                        if match:
-                            print(f"\n=======================================================")
-                            print(f"  PUBLIC SHARE URL: {match.group(0)}")
-                            print(f"=======================================================\n")
-                except Exception as ex:
-                    print(f"Tunnel notice: {ex}")
+            if args.tunnel_token:
+                # Named Cloudflare Tunnel for custom domain (e.g. mpascnet.keybpm.info)
+                def run_named_tunnel():
+                    try:
+                        p = subprocess.Popen(['cloudflared', 'tunnel', 'run', '--token', args.tunnel_token], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                        print(f"\n=======================================================")
+                        print(f"  NAMED CLOUDFLARE TUNNEL RUNNING!")
+                        print(f"  Active on your domain: https://mpascnet.keybpm.info")
+                        print(f"=======================================================\n")
+                        for line in p.stdout:
+                            pass
+                    except Exception as ex:
+                        print(f"Named tunnel notice: {ex}")
 
-            threading.Thread(target=run_tunnel, daemon=True).start()
+                threading.Thread(target=run_named_tunnel, daemon=True).start()
+            else:
+                # 1. Custom URL via localtunnel (e.g. https://mpascnet.loca.lt)
+                try:
+                    import urllib.request
+                    external_ip = urllib.request.urlopen('https://ipv4.icanhazip.com', timeout=3).read().decode('utf8').strip()
+                except Exception:
+                    external_ip = "check Colab IP"
+
+                def run_localtunnel():
+                    try:
+                        p = subprocess.Popen(['npx', '-y', 'localtunnel', '--port', str(args.port), '--subdomain', args.subdomain], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                        for line in p.stdout:
+                            match = re.search(r'https://[a-zA-Z0-9-]+\.loca\.lt', line)
+                            if match:
+                                print(f"\n=======================================================")
+                                print(f"  CUSTOM SUBDOMAIN URL: {match.group(0)}")
+                                print(f"  TUNNEL PASSWORD (IP): {external_ip}")
+                                print(f"  (Enter the IP above if prompted on first visit)")
+                                print(f"=======================================================\n")
+                    except Exception as ex:
+                        print(f"Localtunnel notice: {ex}")
+
+                threading.Thread(target=run_localtunnel, daemon=True).start()
+
+                # 2. Direct Cloudflare Quick Tunnel (Zero Password Fallback)
+                if not os.path.isfile('/usr/local/bin/cloudflared'):
+                    print("Setting up Cloudflare tunnel as direct zero-password fallback...")
+                    try:
+                        subprocess.run(['curl', '-s', '-L', '-o', '/usr/local/bin/cloudflared', 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64'], check=True)
+                        subprocess.run(['chmod', '+x', '/usr/local/bin/cloudflared'], check=True)
+                    except Exception as e:
+                        print(f"Notice: Could not download cloudflared: {e}")
+
+                def run_cf_tunnel():
+                    try:
+                        p = subprocess.Popen(['cloudflared', 'tunnel', '--url', f'http://127.0.0.1:{args.port}'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                        for line in p.stdout:
+                            match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
+                            if match:
+                                print(f"\n=======================================================")
+                                print(f"  CLOUDFLARE PUBLIC SHARE URL: {match.group(0)}")
+                                print(f"=======================================================\n")
+                    except Exception as ex:
+                        print(f"Cloudflare notice: {ex}")
+
+                threading.Thread(target=run_cf_tunnel, daemon=True).start()
+
+    is_colab = os.path.exists('/content') or 'google.colab' in sys.modules
+    if is_colab:
+        try:
+            from google.colab.output import serve_kernel_port_as_window
+            serve_kernel_port_as_window(args.port, anchor_text=f"👉 Open MPASCNet Studio (Direct Google Colab Proxy)")
+        except Exception:
+            pass
 
     print(f"\n=======================================================")
-    print(f"  MPASCNet Web GUI is starting!")
-    print(f"  Open in your web browser: http://localhost:{args.port}")
+    if is_colab:
+        print(f"  MPASCNet Cloud Studio is running in Google Colab!")
+        print(f"  * DO NOT click 'localhost:{args.port}' or '172.28.x.x' (they are internal to Colab).")
+        print(f"  * Use the PUBLIC SHARE URL or the Direct Colab Proxy link above.")
+    else:
+        print(f"  MPASCNet Web GUI is starting!")
+        print(f"  Open in your web browser: http://localhost:{args.port}")
     print(f"=======================================================\n")
     app.run(host='0.0.0.0', port=args.port, debug=False)
