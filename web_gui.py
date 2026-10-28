@@ -161,10 +161,13 @@ def enhance_audio_chunk(audio, generator, h, device):
     return audio_g.squeeze(0).detach().cpu()
 
 
-def enhance_audio_full(audio, generator, h, device, chunk_sec=8.0, overlap_sec=1.0):
+def enhance_audio_full(audio, generator, h, device, chunk_sec=24.0, overlap_sec=3.0):
     """
-    Enhances full audio using seamless overlap-add crossfade.
-    Guarantees fixed low VRAM usage regardless of audio duration.
+    Enhances full audio using Hann-smoothed overlap-add crossfade.
+    - Uses 24-second chunks with 3-second Hann crossfade for seamless temporal context.
+    - Short audio (<= 35s, including preview mode) runs in a single continuous pass.
+    - Avoids phase cancellation boundary dips and volume fluctuations between chunks.
+    - Zero-padding free tail processing preserves natural dynamics through to the end.
     """
     sr = h.sampling_rate
     channels, total_samples = audio.shape
@@ -172,13 +175,14 @@ def enhance_audio_full(audio, generator, h, device, chunk_sec=8.0, overlap_sec=1
     overlap = int(overlap_sec * sr)
     hop = chunk_len - overlap
 
-    if total_samples <= chunk_len + overlap:
-        # Short audio: run in a single pass
+    if total_samples <= sr * 35 or total_samples <= chunk_len + overlap:
+        # Short audio or preview mode: run in a single continuous pass
         return enhance_audio_chunk(audio, generator, h, device)
 
-    # Window for overlap-add crossfading
-    fade_in = torch.linspace(0.0, 1.0, overlap)
-    fade_out = torch.linspace(1.0, 0.0, overlap)
+    # Hann crossfade window for smooth overlap-add without phase dips
+    hann = torch.hann_window(2 * overlap)
+    fade_in = hann[:overlap]
+    fade_out = hann[overlap:]
     window = torch.ones(chunk_len)
     window[:overlap] = fade_in
     window[-overlap:] = fade_out
@@ -186,24 +190,23 @@ def enhance_audio_full(audio, generator, h, device, chunk_sec=8.0, overlap_sec=1
     output = torch.zeros_like(audio)
     weights = torch.zeros(total_samples)
 
-    for start in range(0, total_samples, hop):
-        end = min(start + chunk_len, total_samples)
-        cur_len = end - start
+    # Determine chunk start positions ensuring the last chunk aligns to total_samples without zero-padding
+    starts = list(range(0, total_samples - chunk_len, hop))
+    if len(starts) == 0 or starts[-1] != (total_samples - chunk_len):
+        starts.append(total_samples - chunk_len)
 
+    num_chunks = len(starts)
+    for idx, start in enumerate(starts):
+        end = start + chunk_len
         chunk = audio[:, start:end]
-        if cur_len < chunk_len:
-            # Pad chunk to chunk_len for STFT consistency
-            pad_amount = chunk_len - cur_len
-            chunk = F.pad(chunk, (0, pad_amount))
 
         enhanced_chunk = enhance_audio_chunk(chunk, generator, h, device)
-        enhanced_chunk = enhanced_chunk[:, :cur_len]
 
-        cur_window = window[:cur_len].clone()
-        if start == 0:
+        cur_window = window.clone()
+        if idx == 0:
             cur_window[:overlap] = 1.0
-        if end == total_samples:
-            cur_window[-min(overlap, cur_len):] = 1.0
+        if idx == num_chunks - 1:
+            cur_window[-overlap:] = 1.0
 
         output[:, start:end] += enhanced_chunk * cur_window
         weights[start:end] += cur_window
@@ -235,8 +238,9 @@ def estimate_cutoff_frequency(audio_mono, sr, threshold_db=-85):
 
 def spek_spectrum_rgb(level):
     """
-    Port of Dan Bruton's spectrum algorithm as used in withmorten/spek-alternative (spek-palette.cc).
+    Port of Dan Bruton's spectrum algorithm as used in alexkay/spek (spek-palette.cc).
     Maps level [0.0, 1.0] (-120 dB to 0 dB) to exact Spek RGB colors.
+    Reference: https://github.com/alexkay/spek
     """
     level = np.clip(level, 0.0, 1.0) * 0.6625
     r = np.zeros_like(level)
@@ -287,9 +291,9 @@ def spek_spectrum_rgb(level):
 
 def generate_spek_spectrogram(audio_np, sr, title, meta_info, out_path, is_restored=False):
     """
-    Renders an authentic Spek-Alternative style acoustic spectrogram:
+    Renders an authentic Spek style acoustic spectrogram (reference: https://github.com/alexkay/spek):
     - Pure pitch black canvas
-    - Exact C++ Dan Bruton spectrum palette from withmorten/spek-alternative
+    - Exact C++ Dan Bruton spectrum palette from alexkay/spek
     - Exact Spek FFT normalization: power = |X|^2 / N^2
     - Spek dB range: -120 dB (Black) to 0 dB (Bright Red)
     - 0, 5, 10, 15, 20, 22 kHz frequency rulers with subtle dotted grid
@@ -503,9 +507,8 @@ def api_process():
 
         # 2. Run MPASCNet Enhancement
         with MODEL_LOCK:
-            peak = audio.abs().max().clamp(min=1e-8)
             with torch.no_grad():
-                enhanced = enhance_audio_full(audio / peak, MODEL, CONFIG, DEVICE) * peak
+                enhanced = enhance_audio_full(audio, MODEL, CONFIG, DEVICE)
             enhanced = enhanced.clamp(-1.0, 1.0)
 
         process_time = time.time() - start_time
@@ -517,7 +520,7 @@ def api_process():
         sf.write(orig_wav_path, audio.T.numpy(), sr)
         sf.write(rest_wav_path, enhanced.T.numpy(), sr)
 
-        # 4. Generate Spek-Alternative Spectrograms
+        # 4. Generate Spek Spectrograms
         spek_orig_png = os.path.join(OUTPUT_DIR, f"{session_id}_spek_orig.png")
         spek_rest_png = os.path.join(OUTPUT_DIR, f"{session_id}_spek_rest.png")
         waveform_png = os.path.join(OUTPUT_DIR, f"{session_id}_waveform.png")

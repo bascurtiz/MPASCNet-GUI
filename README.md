@@ -7,7 +7,7 @@
   <a href="https://arxiv.org/abs/2610.16416"><img src="https://img.shields.io/badge/arXiv-2610.16416-b31b1b.svg" alt="arXiv"></a>
 </p>
 
-PyTorch implementation of **MPASCNet**, a magnitude-phase-aware adaptive spectral compression network for compressed music restoration, featuring an interactive **Spek-Alternative** acoustic spectrum analysis Web GUI.
+PyTorch implementation of **MPASCNet**, a magnitude-phase-aware adaptive spectral compression network for compressed music restoration, featuring an interactive **Spek** acoustic spectrum analysis Web GUI (inspired by [alexkay/spek](https://github.com/alexkay/spek)).
 
 <p align="center">
   <img src="assets/mpascnet_architecture.svg" width="100%">
@@ -52,7 +52,7 @@ checkpoint/
 
 ## Inference
 
-### Interactive Web Studio (Spek-Alternative Analyzer)
+### Interactive Web Studio (Spek Analyzer)
 
 <p align="center">
   <img src="assets/gui.webp" width="100%" alt="MPASCNet Web Studio & Spek Spectrograms">
